@@ -2,9 +2,9 @@
 name: "course-html-eval"
 description: "课程质量评分 shuku score course html eval. 评估HTML教学页多维度质量(准确性/覆盖度/可学性/学习流等10维), 输出评分+改进建议."
 status: active
-version: "v2.4"
-date: "2026-09-27T11:05:00.000Z"
-changelog: "v2.3→v2.4: 加 learnability(可学性 0.15) + flow(学习流 0.10) 2 个新维度 / pedagogy 0.22→0.15 / 加入用户主观评分作 Spearman 校准金标准 / 严格化 LLM prompt（防正向偏差）"
+version: "v2.4.1"
+date: "2026-09-27T18:30:00.000Z"
+changelog: "v2.4→v2.4.1: 提供 pipeline/ 参考实现（消除实现歧义）/ 定义 llm_overall 并修正 transition_quality 尺度 / 明确 standard=每页3次整页评分+扰动协议 / stuck v2 信号法（v1 实测 92% 页面误报 P0）/ 新增 JS 渲染盲区置信度封顶 / 定义等级分档与报告 schema / 批量汇总报告 / 校准方法学修订"
 ---
 
 # 课程网页 HTML 质量评估 (v2.4)
@@ -45,6 +45,8 @@ changelog: "v2.3→v2.4: 加 learnability(可学性 0.15) + flow(学习流 0.10)
 | **standard**（默认）| 14 | 3 次/页 | shuku 用户内容评分 |
 | **strict** | 45 | 9 次/页 | 学术 / 极限准确度 |
 
+> **调用口径（v2.4.1 明确）**：档位中的"LLM 调用"指**每页整体评分**的次数；章节切分文本（步骤 5）作为证据注入 prompt，**不逐节独立调用**。逐节模式仅 strict 档选用，节分 → 页分用长度加权平均。3 次评分必须按步骤 6 的扰动协议执行（顺序打乱 + temperature ≥ 0.7），否则自洽校验无效。
+
 ---
 
 ## 工作流
@@ -57,12 +59,16 @@ changelog: "v2.3→v2.4: 加 learnability(可学性 0.15) + flow(学习流 0.10)
 
 **完成标准**：得到可遍历的 soup 对象。
 
+> **v2.4.1**：步骤 1~5 的规范实现见 `pipeline/extract_features.py`——指标公式以代码为准，本文档只保留含义与阈值，消除"每个评估者实现一套"的复现性问题。
+
 ### 2. 结构化特征提取
 
 - 字符数 / 词数 / 段落数 / 章节数（h1/h2/h3）
 - **v2.4 新增**：检测 `prerequisites` 标注（前后置概念是否清晰）
 - **v2.4 新增**：检测章节间过渡元素（衔接词、"下一步"按钮、回顾链接）
 - **v2.2 保留**：检测严格输入元素 / 防卡顿元素（`data-hint` / `data-skip` 等）
+- **v2.4.1 新增**：`text_density`（可见字符/原始 KB）、`js_render_ratio`（script 字节占比）、
+  `suspected_render_fault` 标记 → 用于步骤 9 的置信度封顶（JS 渲染页静态提取不完整，不能按完整页面扣分）
 
 ### 3. 页面类型自动检测
 
@@ -74,14 +80,18 @@ def detect_page_type(features):
     return "teaching"
 ```
 
-### 4. 硬规则提取（v2.2 起不变）
+> **v2.4.1 兜底**：JS 渲染页往往没有 `<nav>` 标签、canvas 在渲染前也不存在，静态三规则全部落空会误判成 teaching（实测 CourseMap 即此情况）。兜底顺序：① 模块名关键词（`playground|lab|tool → tool`；`map|nav|catalog → nav` 且 section_count ≤ 3）；② 仓库级元数据。实现见 `pipeline/extract_features.py::detect_page_type`——返回值带 `page_type_source`（`static` / `name_fallback`），报告中保留来源标记以便复核。
 
-| 指标 | 阈值 |
-|---|---|
-| `alt_coverage` | < 0.8 → a11y 扣 0.5 |
-| `heading_skip` | 出现 → structure 扣 0.3 |
-| `aria_label_rate` | < 0.5 → a11y 扣 0.5 |
-| `stuck_likelihood` | ≥ 0.7 → 触发 ux_risk_alert |
+### 4. 硬规则提取（v2.4.1 精确化：公式以 `pipeline/extract_features.py` 为准）
+
+| 指标 | 精确定义 | 阈值 |
+|---|---|---|
+| `alt_coverage` | 非空 alt 的 `<img>` / 全部 `<img>`（页面无 img 记 1.0） | < 0.8 → a11y 扣 0.5 |
+| `heading_skip` | 标题序列出现 h_n → h_{n+2} 跳级 | 出现 → structure 扣 0.3 |
+| `aria_label_rate` | 可访问交互元素（有 aria-label / aria-labelledby / title / 关联 label / 非空文本的 button）÷ button + a[href] + input + select + textarea 总数 | < 0.5 → a11y 扣 0.5 |
+| `stuck_likelihood` | **v2 信号法**：R = 风险信号数（硬性门槛 / 无进度长任务 / 无示例开放任务 / 资源加载失败 / ≥3 级深链，各 1 分），M = 缓解机制数（data-hint / data-skip / example 及提示类按钮，上限 8），L = clamp(0.15 + 0.12R − 0.05M, 0, 1) | ≥ 0.25 → 触发 ux_risk_alert（`--stuck-threshold` 可调） |
+
+> **v1 废弃说明**：v1 的 `stuck_likelihood`（文案命中数启发式，阈值 0.7）在 12 模块实测中对 92% 页面误报 P0 告警，失去区分度。v2 改为"风险信号 − 缓解机制"信号法；阈值 0.25 为初始经验值，建议用带标注的真实卡顿数据再校准。
 
 ### 5. 章节切分
 
@@ -90,6 +100,10 @@ def detect_page_type(features):
 ### 6. LLM 多维度评分（**v2.4 严格化 prompt**）
 
 **关键修改**：prompt 增加**反偏差指令**——LLM 默认偏宽松，要求更严格。
+
+**评分口径（v2.4.1 明确）**：standard 档 = 每页整体评 3 次（章节文本作为证据注入 prompt，非逐节调用）；3 次必须按扰动协议执行（文档序 / 倒序 / 按节长度排序，temperature ≥ 0.7）。完整 prompt 模板（含各维度锚点与子项定义）见 `pipeline/llm_prompt.md`。
+
+**评分口径（v2.4.1 明确）**：standard 档 = 每页整体评 3 次（章节文本作为证据注入 prompt，非逐节调用）；3 次必须按扰动协议执行（文档序 / 倒序 / 按节长度排序，temperature ≥ 0.7）。完整 prompt 模板（含各维度锚点与子项定义）见 `pipeline/llm_prompt.md`。
 
 ```
 你是严格的教育内容评审专家，对**真实学习体验**评分。
@@ -131,9 +145,10 @@ def detect_page_type(features):
 输出 JSON：
 {
   "scores": [
-    {"dim":"accuracy","value":4,"evidence":"原文：xxx","confidence":3},
+    {"dim":"accuracy","value":4,"evidence":"原文：xxx","confidence":"high|medium|low"},
     ...
   ],
+  "llm_overall": 4,
   "interaction_subs": {
     "answer_tolerance": 3, "hint_progression": 2,
     "stuck_detection": 2, "error_feedback": 4
@@ -145,17 +160,22 @@ def detect_page_type(features):
   },
   "flow_subs": {
     "section_order": 4,
-    "transition_quality": 10
+    "transition_quality": 4
   },
   ...
 }
 ```
 
-**interaction 加权**：`mean(interaction_subs) × 0.7 + llm_overall × 0.3`
+**interaction 加权（v2.4.1）**：`mean(interaction_subs) × 0.7 + llm_overall × 0.3`
+（v2.4 公式引用了 `llm_overall` 但评分 schema 未要求输出——已补进上方 JSON；锚点：5 = 愿意直接交给初学者独立使用，3 = 需陪同指导，1 = 不建议使用）
+
+**子项用途（v2.4.1 明确）**：`learnability_subs` / `flow_subs` 仅作诊断展示与改进建议定位，**不参与维度加权**（interaction 例外：4 子项按 0.7 卷入 interaction 分）。
 
 ### 7. Self-Consistency 校验（tier ≥ standard）
 
 3 次评分取均值，标准差 > 1.0 标 `unstable`。
+
+**v2.4.1 补充**：3 次评分必须按步骤 6 的扰动协议执行——同会话零扰动自评的 std 必然偏小，校验形同虚设。判定 unstable 后：剔除离中位数最远的一次取均值，保留 `unstable_fixed` 标记。实现见 `pipeline/aggregate.py::dim_stats`。
 
 ### 8. 硬规则叠加
 
@@ -177,6 +197,12 @@ def weighted_total(scores, weights):
     if total_w == 0: return 0
     return sum(scores[k] * w for k, w in active.items()) / total_w * 20
 ```
+
+> **v2.4.1 注**：tool 行权重合计 0.98、nav 1.01、docs 1.09，与"合计 1.00"不符——公式按 active 权重归一化，结果不受影响，但表格数字不再声称合计为 1。
+
+**等级分档（v2.4.1 文档化）**：A+ ≥ 95 · A ≥ 90 · A- ≥ 85 · B+ ≥ 80 · B ≥ 75 · B- ≥ 70 · C+ ≥ 65 · C ≥ 60 · D < 60
+
+**置信度封顶（v2.4.1 新增）**：当 `suspected_render_fault = true`（内容疑似 JS 渲染、静态提取不完整）时，coverage / visualization 置信度强制降为 low，且**总分封顶 85**。可用 headless 渲染（`pipeline/extract_features.py --render`，需 playwright）重新提取后解除封顶。`text_density < 60 字符/KB` 时 coverage / visualization 置信度降为 medium。
 
 ### 10. 改进建议生成
 
@@ -202,6 +228,8 @@ def weighted_total(scores, weights):
 
 ```json
 {
+  "schema_version": "1.1",
+  "fingerprint": {"url": "...", "html_sha1": "...", "extracted_at": "2026-09-27T00:00:00Z", "page_type_source": "static"},
   "total_score": 87.5,
   "grade": "A-",
   "page_type": "teaching",
@@ -214,11 +242,13 @@ def weighted_total(scores, weights):
     "interaction": {"score": 3.5, "weight": 0.06, "confidence": "high",
                     "subs": {"answer_tolerance": 3, "hint_progression": 2, "stuck_detection": 2, "error_feedback": 4}}
   },
-  "hard_rules": {"alt_coverage": 0.95, "stuck_likelihood": 0.85},
-  "ux_risk_alert": "P0_high_stuck_risk",
+  "hard_rules": {"alt_coverage": 0.95, "aria_label_rate": 0.40, "heading_skip": false, "stuck_likelihood": 0.27},
+  "ux_risk_alert": null,
   "improvements": [...]
 }
 ```
+
+完整字段定义见 `references/report_schema.md`（v2.4.1 新增）。
 
 ---
 
@@ -292,6 +322,11 @@ gold_standard:
 2. 计算 Spearman ρ（v2.4 输出 vs gold_standard）
 3. ρ ≥ 0.7 → 通过；ρ < 0.7 → 调权重或 prompt
 
+**方法学注意（v2.4.1）**：
+- 金标准必须在**同一份静态提取文本**上采集——若金标准者看完整交互版、LLM 只看静态提取版，比较对象不一致，会混淆"rubric 偏差"与"评审对象差异"
+- n=11 且重秩多（实测四个 7、三个 9）时 Spearman ρ 本身不稳定，报告需同时给出重秩比例
+- ρ 计算实现：`pipeline/aggregate.py::spearman`（并列值取平均秩）
+
 **v2.3 baseline 校准结果**：
 - 平均偏差 +12.5 分
 - Spearman ρ ≈ 0.55（中等，低于 0.7 目标）
@@ -307,9 +342,26 @@ gold_standard:
 | HTML 不可解析 | 退回纯文本模式评分（5/10 维有效）|
 | LLM 调用超时 | 标 `unscored`，不阻塞其他章节 |
 | LLM 返回非 JSON | 正则抽取分数 + 标 `parse_degraded` |
+| 静态提取文本过少（JS 渲染页） | 步骤 9 置信度封顶；可选 `--render` headless 重提取 |
+| 自洽校验 unstable | 剔除离中位数最远的一次取均值，保留 `unstable_fixed` 标记（步骤 7） |
+| 静态提取文本过少（JS 渲染页） | 步骤 9 置信度封顶；可选 `--render` headless 重提取 |
+| 自洽校验 unstable | 剔除离中位数最远的一次取均值，保留 `unstable_fixed` 标记（步骤 7） |
 | 章节过短（< 50 字）| 跳过 |
 | interaction 子项缺失 | fallback 到 interaction 总分平均 |
 | learnability / flow 子项缺失 | fallback 到对应维度总分 |
+
+---
+
+## 📦 批量汇总报告（v2.4.1 新增）
+
+多页评估时，`pipeline/aggregate.py --batch` 额外产出 `report_summary.md`：
+
+1. 排名表（总分 / 等级 / 页面类型 / stuck / 告警 / 封顶标记）
+2. 10 维分布（均值 + 最低分模块）
+3. 硬规则违规统计（alt / aria / heading_skip / P0 命中页清单）
+4. 改进建议去重聚类（按 优先级 × impact_dim）
+5. 校准块（金标准存在时：n / ρ / 平均偏差 / 方法学注记）
+6. 置信度提示（疑似渲染故障页清单）
 
 ---
 
@@ -330,6 +382,7 @@ gold_standard:
 | LLM prompt | 标准 | 标准 | 标准 | **严格化（反正向偏差）** |
 | 校准金标准 | 无 | 无 | 无 | **学弟 11 模块评分** |
 | Spearman ρ 目标 | — | — | ≥ 0.7 | ≥ 0.7（11 模块实测）|
+| **v2.4.1 补充** | — | — | — | **参考实现 + schema 修正 + stuck v2 + 封顶/分档/批量汇总/校准方法学** |
 
 ## 参考资源
 
@@ -338,3 +391,5 @@ gold_standard:
 - 硬规则映射表：`references/hard_rules.md`
 - interaction 4 子项细则：`references/interaction_robustness.md`
 - **v2.4 新增**：learnability + flow 子项细则：`references/learnability_flow.md`
+- **v2.4.1 新增**：参考实现 `pipeline/extract_features.py` / `pipeline/aggregate.py` / `pipeline/llm_prompt.md`
+- **v2.4.1 新增**：报告与输入 schema：`references/report_schema.md`

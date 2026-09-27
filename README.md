@@ -1,6 +1,6 @@
 # course-html-eval
 
-> 课程网页 HTML 质量评估 · 10 维 LLM 评分 + 防卡顿告警 · v2.4
+> 课程网页 HTML 质量评估 · 10 维 LLM 评分 + 防卡顿告警 · v2.4.1.1
 
 对教育类课程网页 HTML 做多维度质量评分。基于 **10 维 Rubric**（准确性 / 覆盖度 / 结构 / 可读性 / 教学 / 可视化 / 互动 / a11y / **可学性** / **学习流**）+ 硬规则指标 + 页面类型自动检测 + interaction 维度拆 4 子项防卡顿。
 
@@ -16,6 +16,21 @@
 - **降 pedagogy 权重**：0.22 → **0.15**（用户校准显示 v2.3 严重偏高）
 - **LLM prompt 严格化**：加"5 分只给真正出色"等反偏差指令
 - **校准金标准**：学弟 11 模块主观评分（CourseMap 剔除），Spearman ρ 目标 ≥ 0.7
+
+---
+
+## ✨ v2.4.1 新特性（参考实现 + 可复现性修复）
+
+12 模块实测（standard 档）暴露的问题，全部在本版修复：
+
+- **pipeline/ 参考实现**：`extract_features.py` / `aggregate.py` / `llm_prompt.md`——指标公式以代码为准，消除"每个评估者实现一套"的复现性问题
+- **schema 修正**：`llm_overall` 补进评分 JSON（v2.4 公式引用了它但没要求输出）；`transition_quality: 10` 尺度笔误修正为 1~5
+- **评分口径明确**：standard = 每页 3 次**整页**评分 + 扰动协议（文档序/倒序/按节长度，temperature ≥ 0.7），章节文本作证据注入而非逐节调用
+- **stuck v2 信号法**：v1 文案启发式实测对 92% 页面误报 P0；v2 改为"风险信号 − 缓解机制"信号法，阈值 0.25（可调）
+- **JS 渲染盲区兜底**：`js_render_ratio` / `text_density` / `suspected_render_fault` → 置信度封顶，可选 playwright headless 重提取
+- **等级分档文档化**：A+ ≥95 · A ≥90 · A- ≥85 · B+ ≥80 · B ≥75 · B- ≥70 · C+ ≥65 · C ≥60 · D <60；报告 schema 见 `references/report_schema.md`
+- **批量汇总报告**：`aggregate.py --batch` 产出 `report_summary.md`（排名/10 维分布/违规统计/建议聚类/校准块）
+- **校准方法学修订**：金标准须在同一份静态提取文本上采集；n=11 重秩多时 ρ 需同时报告重秩比例
 
 ---
 
@@ -70,22 +85,21 @@ evaluate(html, tier="strict")    # 严谨模式
 interaction_score = mean(4 子项) × 0.7 + llm_overall_interaction × 0.3
 ```
 
-### `ux_risk_alert` 触发规则
+### `ux_risk_alert` 触发规则（v2.4.1 = stuck v2 信号法）
 
 ```python
-stuck_likelihood = (
-    (0.30 if has_strict_number_input else 0) +
-    (0.30 if not has_hint_progression else 0) +
-    (0.20 if not has_skip_option      else 0) +
-    (0.20 if not has_stuck_timeout    else 0)
-)
+# R = 风险信号数（各 1 分）：硬性门槛 / 无进度长任务 / 无示例开放任务 / 资源加载失败 / ≥3 级深链
+# M = 缓解机制数（上限 8）：data-hint / data-skip / example 及提示类按钮
+stuck_likelihood = max(0.0, min(1.0, 0.15 + 0.12 * R - 0.05 * M))
 
-if stuck_likelihood >= 0.7:  ux_risk_alert = "P0_high_stuck_risk"
-elif stuck_likelihood >= 0.4: ux_risk_alert = "medium"
-else:                         ux_risk_alert = None
+if stuck_likelihood >= 0.25:   ux_risk_alert = "P0_high_stuck_risk"  # --stuck-threshold 可调
+elif stuck_likelihood >= 0.15: ux_risk_alert = "medium"
+else:                          ux_risk_alert = None
 ```
 
-**v2.4 新增风险信号**：`learnability + flow 双向 < 3` → `P0_complex_for_learners`
+**v1 废弃说明**：v1 文案启发式（阈值 0.7）在 12 模块实测对 92% 页面误报 P0，告警失去区分度，已废弃；阈值 0.25 为初始经验值，建议用带标注的真实卡顿数据再校准。
+**v2.4 风险信号保留**：`learnability + flow 双向 < 3` → `P0_complex_for_learners`。
+实现：`pipeline/extract_features.py::stuck_v2`。
 
 ---
 
@@ -106,21 +120,31 @@ else:                         ux_risk_alert = None
 1. 跑 v2.4 LLM 评分（11 模块）
 2. Spearman ρ ≥ 0.7 → 通过；< 0.7 → 调权重或 prompt
 
+**方法学注意（v2.4.1）**：
+- 金标准必须在**同一份静态提取文本**上采集——若金标准者看完整交互版、LLM 只看静态提取版，比较对象不一致，会混淆"rubric 偏差"与"评审对象差异"
+- n=11 且重秩多（实测四个 7、三个 9）时 Spearman ρ 本身不稳定，需同时报告重秩比例
+- ρ 计算：`pipeline/aggregate.py::spearman`（并列值取平均秩）
+
 ---
 
 ## 📦 文件结构
 
 ```
 course-html-eval/
-├── SKILL.md                              # 主流程（v2.4, 11.5K bytes）
+├── SKILL.md                              # 主流程（v2.4.1）
 ├── README.md                             # 本文档
 ├── LICENSE                               # MIT
+├── pipeline/                             # ★ v2.4.1 参考实现（公式以代码为准）
+│   ├── extract_features.py              # 步骤 1~5：解析/特征/页型检测/stuck v2（--render 可选 playwright）
+│   ├── aggregate.py                     # 步骤 7~11：自洽/硬规则/加权/分档/封顶/校准 ρ（--batch 批量汇总）
+│   └── llm_prompt.md                    # 步骤 6：完整 prompt 模板（锚点 + 子项定义 + 扰动协议）
 └── references/
     ├── rubric_full.md                   # 10 维评分 1~5 锚点
     ├── calibration_schema.md            # 校准数据集 schema + v1 校准集
     ├── hard_rules.md                    # 硬规则映射表
     ├── interaction_robustness.md        # interaction 4 子项细则
-    └── learnability_flow.md             # learnability 3 子项 + flow 2 子项细则
+    ├── learnability_flow.md             # learnability 3 子项 + flow 2 子项细则
+    └── report_schema.md                 # ★ v2.4.1 报告与输入 schema（1.1）
 ```
 
 ---
@@ -129,6 +153,8 @@ course-html-eval/
 
 ```json
 {
+  "schema_version": "1.1",
+  "fingerprint": {"url": "...", "html_sha1": "...", "extracted_at": "2026-09-27T00:00:00Z", "page_type_source": "static"},
   "total_score": 87.5,
   "grade": "A-",
   "page_type": "teaching",
@@ -152,8 +178,8 @@ course-html-eval/
       "subs": {"answer_tolerance": 3, "hint_progression": 2, "stuck_detection": 2, "error_feedback": 4}
     }
   },
-  "hard_rules": {"alt_coverage": 0.95, "stuck_likelihood": 0.85},
-  "ux_risk_alert": "P0_high_stuck_risk",
+  "hard_rules": {"alt_coverage": 0.95, "aria_label_rate": 0.40, "heading_skip": false, "stuck_likelihood": 0.27},
+  "ux_risk_alert": null,
   "improvements": [
     {"priority":"P0","action":"加入渐进式提示系统（方向→关键词→答案）",
      "impact_dim":"interaction (hint_progression + stuck_detection)","cost_hours":4}
@@ -161,21 +187,23 @@ course-html-eval/
 }
 ```
 
+完整字段定义见 `references/report_schema.md`（v2.4.1 新增）。
+
 ---
 
 ## 完整流程
 
-1. 预处理与解析（BeautifulSoup）
-2. 结构化特征提取（含防卡顿 + 可学性特征）
-3. 页面类型自动检测
-4. 硬规则提取（4 个：alt/heading/aria/stuck_likelihood）
-5. 章节切分
-6. LLM 10 维评分（**严格化 prompt** / interaction 拆 4 子项 / learnability 拆 3 子项 / flow 拆 2 子项）
-7. Self-Consistency 校验（standard+）
+1. 预处理与解析（BeautifulSoup）→ `pipeline/extract_features.py`
+2. 结构化特征提取（含防卡顿 + 可学性 + 渲染盲区指标 `text_density` / `js_render_ratio`）
+3. 页面类型自动检测（静态规则 + 名称兜底，输出 `page_type_source`）
+4. 硬规则提取（4 个：alt/heading/aria/stuck_likelihood **v2 信号法**）
+5. 章节切分（≤ 800 tokens，作为证据注入 prompt）
+6. LLM 10 维评分（**严格化 prompt** / 整页 3 次 + 扰动协议 / interaction 拆 4 子项 / learnability 拆 3 子项 / flow 拆 2 子项）→ `pipeline/llm_prompt.md`
+7. Self-Consistency 校验（standard+，unstable → 剔离群取均值）→ `pipeline/aggregate.py::dim_stats`
 8. 硬规则叠加
-9. 维度加权与总分（归一化 0~100）
+9. 维度加权与总分（归一化 0~100 / 等级分档 / 渲染故障置信度封顶）
 10. 改进建议生成（**ux_risk_alert=P0 强制置顶**）
-11. 输出报告（含 10 维度 + interaction_subs + learnability_subs + flow_subs）
+11. 输出报告（schema 1.1，含 fingerprint / 10 维 + 子项）；多页时 `aggregate.py --batch` 产出 `report_summary.md`
 
 ---
 
@@ -189,6 +217,7 @@ course-html-eval/
 
 | 版本 | 主要变更 |
 |---|---|
+| **v2.4.1** | pipeline/ 参考实现 / llm_overall + transition_quality schema 修正 / standard=每页 3 次+扰动协议 / stuck v2 信号法 / JS 渲染置信度封顶 / 等级分档 + 报告 schema / 批量汇总 / 校准方法学 |
 | **v2.4** | 加 learnability + flow 2 维（10 维）/ pedagogy 0.22→0.15 / 严格化 prompt / 学弟 11 模块评分作校准金标准 |
 | v2.3 | 删除 code 维度（8 维）/ interaction 0.05→0.08 |
 | v2.2 | interaction 拆 4 子项 / ux_risk_alert / stuck_likelihood 硬规则 |
