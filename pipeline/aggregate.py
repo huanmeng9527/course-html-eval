@@ -86,9 +86,11 @@ def dim_stats(passes, idx: int) -> dict:
         used.remove(far)
         mean = sum(used) / len(used)
         fixed = True
-    if mean <= 0.3:
+    # 置信度 v2.4.1 修正：原版 `if mean <= 0.3: conf = "high"` 是反向逻辑（mean 已是 1-5 分数，0.3 阈值会触发低分打 high confidence）。
+    # 改为基于 std 的不确定性判断。
+    if std <= 0.5:
         conf = "high"
-    elif std <= 0.8:
+    elif std <= 1.0:
         conf = "medium"
     else:
         conf = "low"
@@ -199,11 +201,17 @@ def aggregate_one(name: str, mod: dict, feats: dict | None, stuck_thr: float) ->
         total = min(total, CONFIDENCE_CAP)
         cap = True
         for d in ("coverage", "visualization"):
+            # v2.4.1 修正：保留原始 confidence 值，加 confidence_original + downgraded flag，避免信息丢失。
+            if dims[d]["confidence"] != "low":
+                dims[d]["confidence_original"] = dims[d]["confidence"]
+                dims[d]["confidence_downgraded"] = True
             dims[d]["confidence"] = "low"
             dims[d]["confidence_note"] = "suspected_render_fault: 静态提取不完整"
     elif density < DENSITY_FLOOR:
         for d in ("coverage", "visualization"):
             if dims[d]["confidence"] == "high":
+                dims[d]["confidence_original"] = "high"
+                dims[d]["confidence_downgraded"] = True
                 dims[d]["confidence"] = "medium"
                 dims[d]["confidence_note"] = f"text_density<{DENSITY_FLOOR:.0f} 字符/KB"
 
