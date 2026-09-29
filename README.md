@@ -1,6 +1,6 @@
 # course-html-eval
 
-> 课程网页 HTML 质量评估 · 10 维 LLM 评分 + 防卡顿告警 · v2.4.1.1
+> 课程网页 HTML 质量评估 · 10 维 LLM 评分 + 防卡顿告警 · v2.4.3
 
 对教育类课程网页 HTML 做多维度质量评分。基于 **10 维 Rubric**（准确性 / 覆盖度 / 结构 / 可读性 / 教学 / 可视化 / 互动 / a11y / **可学性** / **学习流**）+ 硬规则指标 + 页面类型自动检测 + interaction 维度拆 4 子项防卡顿。
 
@@ -34,6 +34,38 @@
 
 ---
 
+## ✨ v2.4.2 新特性（证据置信度剔除）
+
+- **置信度逻辑修正**：`dim_stats()` 由 mean 阈值（1~5 尺度上不可达）改为**标准差法**——单 pass → low；std ≤ 0.3 → high；≤ 0.8 → medium；否则 low。置信度覆写保留原值（`confidence_original` + `confidence_overridden` 标记）
+- **证据置信度剔除**：评分 LLM 自报每维证据置信度（high|medium|low），3 pass 多数票聚合为 `dim_confidence`；**low 的维度不参与加权**（权重归一化到其余维度），分数仍展示并标 `weighted=false`——防止"没看全"的维度按臆测分拉低总分
+- **渲染提取一致性修复**：`--render` 同时作用于特征提取与章节切分（此前章节仍读静态 HTML）
+- **DeepSeek runner**：`pipeline/llm_runner_deepseek.py`——standard 档 3 pass 扰动评分、指数退避重试、JSON 降级解析、模块粒度断点续跑、`dim_confidence` 生产端
+
+---
+
+## ✨ v2.4.3 新特性（评审决策剔除）
+
+- **决策剔除**：`aggregate.py --exclude-dims a11y` 将指定维度移出加权（如用户决策"本评估场景不考虑无障碍"），权重归一化到其余维度；报告新增 `decision_excluded_dims` 字段与 `rubric_decisions` 决策块
+- **建议重分类**：`remap_a11y_improvements()` 将剔除维度下的改进建议按关键词重分类到 readability / learnability / interaction（纯键盘/读屏项标记 `not_tracked`），避免"建议跟着维度一起丢"
+
+---
+
+## ✨ v2.4.2 新特性（证据置信度剔除）
+
+- **置信度逻辑修正**：`dim_stats()` 由 mean 阈值（1~5 尺度上不可达）改为**标准差法**——单 pass → low；std ≤ 0.3 → high；≤ 0.8 → medium；否则 low。置信度覆写保留原值（`confidence_original` + `confidence_overridden` 标记）
+- **证据置信度剔除**：评分 LLM 自报每维证据置信度（high|medium|low），3 pass 多数票聚合为 `dim_confidence`；**low 的维度不参与加权**（权重归一化到其余维度），分数仍展示并标 `weighted=false`——防止"没看全"的维度按臆测分拉低总分
+- **渲染提取一致性修复**：`--render` 同时作用于特征提取与章节切分（此前章节仍读静态 HTML）
+- **DeepSeek runner**：`pipeline/llm_runner_deepseek.py`——standard 档 3 pass 扰动评分、指数退避重试、JSON 降级解析、模块粒度断点续跑、`dim_confidence` 生产端
+
+---
+
+## ✨ v2.4.3 新特性（评审决策剔除）
+
+- **决策剔除**：`aggregate.py --exclude-dims a11y` 将指定维度移出加权（如用户决策"本评估场景不考虑无障碍"），权重归一化到其余维度；报告新增 `decision_excluded_dims` 字段与 `rubric_decisions` 决策块
+- **建议重分类**：`remap_a11y_improvements()` 将剔除维度下的改进建议按关键词重分类到 readability / learnability / interaction（纯键盘/读屏项标记 `not_tracked`），避免"建议跟着维度一起丢"
+
+---
+
 ## 三档配置
 
 | 档位 | 独立指标数 | LLM 调用 | 适用 |
@@ -46,6 +78,20 @@
 evaluate(html, tier="standard")  # 默认
 evaluate(html, tier="lite")      # 省钱模式
 evaluate(html, tier="strict")    # 严谨模式
+```
+
+### 端到端跑通（DeepSeek）
+
+```powershell
+# 1) 特征提取（--render 可选 playwright 渲染，JS 页建议开启）
+python pipeline/extract_features.py --modules-dir <模块目录> --out-dir <输出目录> --render
+
+# 2) DeepSeek 评分（3 pass/页；Key 从环境变量或脚本同目录 .api_key 读取）
+$env:DEEPSEEK_API_KEY = "sk-..."
+python pipeline/llm_runner_deepseek.py --sections-dir <输出目录>/sections --features-dir <输出目录>/features --out <输出目录>/llm_scores.json
+
+# 3) 聚合出报告（--exclude-dims 可选决策剔除，如 a11y）
+python pipeline/aggregate.py --features-dir <输出目录>/features --scores <输出目录>/llm_scores.json --out-dir <输出目录> --batch
 ```
 
 ---
@@ -131,12 +177,13 @@ else:                          ux_risk_alert = None
 
 ```
 course-html-eval/
-├── SKILL.md                              # 主流程（v2.4.1）
+├── SKILL.md                              # 主流程（v2.4.3）
 ├── README.md                             # 本文档
 ├── LICENSE                               # MIT
-├── pipeline/                             # ★ v2.4.1 参考实现（公式以代码为准）
+├── pipeline/                             # ★ 参考实现（公式以代码为准）
 │   ├── extract_features.py              # 步骤 1~5：解析/特征/页型检测/stuck v2（--render 可选 playwright）
-│   ├── aggregate.py                     # 步骤 7~11：自洽/硬规则/加权/分档/封顶/校准 ρ（--batch 批量汇总）
+│   ├── llm_runner_deepseek.py           # ★ v2.4.2 步骤 6 实现：DeepSeek 3 pass 扰动评分 + dim_confidence
+│   ├── aggregate.py                     # 步骤 7~11：自洽/硬规则/加权/分档/封顶/校准 ρ（--batch / --exclude-dims）
 │   └── llm_prompt.md                    # 步骤 6：完整 prompt 模板（锚点 + 子项定义 + 扰动协议）
 └── references/
     ├── rubric_full.md                   # 10 维评分 1~5 锚点
@@ -144,7 +191,7 @@ course-html-eval/
     ├── hard_rules.md                    # 硬规则映射表
     ├── interaction_robustness.md        # interaction 4 子项细则
     ├── learnability_flow.md             # learnability 3 子项 + flow 2 子项细则
-    └── report_schema.md                 # ★ v2.4.1 报告与输入 schema（1.1）
+    └── report_schema.md                 # ★ 报告与输入 schema（1.1，v2.4.2/v2.4.3 增补）
 ```
 
 ---
@@ -217,6 +264,8 @@ course-html-eval/
 
 | 版本 | 主要变更 |
 |---|---|
+| **v2.4.3** | 评审决策剔除 `--exclude-dims` / 剔除维度改进建议重分类（remap_a11y_improvements）/ 报告 `decision_excluded_dims` + `rubric_decisions` |
+| **v2.4.2** | 证据置信度剔除（dim_confidence 3 pass 多数票，low 维度不参与加权）/ dim_stats 置信度标准差法修正 / 覆写保留原值 / --render 章节一致性修复 / DeepSeek runner 入库 |
 | **v2.4.1** | pipeline/ 参考实现 / llm_overall + transition_quality schema 修正 / standard=每页 3 次+扰动协议 / stuck v2 信号法 / JS 渲染置信度封顶 / 等级分档 + 报告 schema / 批量汇总 / 校准方法学 |
 | **v2.4** | 加 learnability + flow 2 维（10 维）/ pedagogy 0.22→0.15 / 严格化 prompt / 学弟 11 模块评分作校准金标准 |
 | v2.3 | 删除 code 维度（8 维）/ interaction 0.05→0.08 |

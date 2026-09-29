@@ -7,7 +7,7 @@ date: "2026-09-27T18:30:00.000Z"
 changelog: "v2.4→v2.4.1: 提供 pipeline/ 参考实现（消除实现歧义）/ 定义 llm_overall 并修正 transition_quality 尺度 / 明确 standard=每页3次整页评分+扰动协议 / stuck v2 信号法（v1 实测 92% 页面误报 P0）/ 新增 JS 渲染盲区置信度封顶 / 定义等级分档与报告 schema / 批量汇总报告 / 校准方法学修订"
 ---
 
-# 课程网页 HTML 质量评估 (v2.4)
+# 课程网页 HTML 质量评估 (v2.4.3)
 
 对教育类课程网页 HTML 做 LLM 多维度质量评分。  
 适用：shuku 用户上传的课程内容评估、教学页面质量审核、课程页面自动评分标准建立。
@@ -203,6 +203,10 @@ def weighted_total(scores, weights):
 **等级分档（v2.4.1 文档化）**：A+ ≥ 95 · A ≥ 90 · A- ≥ 85 · B+ ≥ 80 · B ≥ 75 · B- ≥ 70 · C+ ≥ 65 · C ≥ 60 · D < 60
 
 **置信度封顶（v2.4.1 新增）**：当 `suspected_render_fault = true`（内容疑似 JS 渲染、静态提取不完整）时，coverage / visualization 置信度强制降为 low，且**总分封顶 85**。可用 headless 渲染（`pipeline/extract_features.py --render`，需 playwright）重新提取后解除封顶。`text_density < 60 字符/KB` 时 coverage / visualization 置信度降为 medium。
+
+**证据置信度剔除（v2.4.2 新增）**：评分 LLM 自报的每维证据置信度（high|medium|low）按 3 pass 多数票聚合为 `dim_confidence`，其中 **low 的维度不参与加权**（权重归一化到其余维度），分数仍展示并标 `weighted=false`——防止"没看全"的维度按臆测分拉低总分。无该字段时行为与 v2.4.1 一致。
+
+**评审决策剔除（v2.4.3 新增）**：`aggregate.py --exclude-dims a11y` 可将指定维度移出加权（如用户决策"本评估场景不考虑无障碍"），权重归一化到其余维度；同时 `remap_a11y_improvements()` 将剔除维度下的改进建议按关键词重分类到 readability / learnability / interaction（纯键盘/读屏项标记 `not_tracked`），避免"建议跟着维度一起丢"。报告新增 `decision_excluded_dims` 字段与 `rubric_decisions` 决策块。
 
 ### 10. 改进建议生成
 

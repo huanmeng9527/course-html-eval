@@ -212,7 +212,8 @@ def extract_sections(soup) -> list:
     return out
 
 
-def extract_features(module_dir: Path, render: bool = False) -> dict:
+def extract_features(module_dir: Path, render: bool = False,
+                     return_html: bool = False):
     html_path = module_dir / "index.html"
     if not html_path.exists():
         raise FileNotFoundError(str(html_path))
@@ -277,7 +278,7 @@ def extract_features(module_dir: Path, render: bool = False) -> dict:
     cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
     latin_words = len(re.findall(r"[A-Za-z]+", text))
 
-    return {
+    feats = {
         "schema_version": CODE_VERSION,
         "module": module_dir.name,
         "page_type": page_type,
@@ -307,6 +308,12 @@ def extract_features(module_dir: Path, render: bool = False) -> dict:
         "strict_input_count": strict_inputs,
         "anti_stuck_elements": anti_stuck_elements,
     }
+    if return_html:
+        return feats, html
+    return feats
+    if return_html:
+        return feats, html
+    return feats
 
 
 def main() -> None:
@@ -342,11 +349,12 @@ def main() -> None:
     (out / "sections").mkdir(parents=True, exist_ok=True)
 
     for d in module_dirs:
-        feats = extract_features(d, render=args.render)
+        feats, html_used = extract_features(d, render=args.render, return_html=True)
         (out / "features" / f"{d.name}.json").write_text(
             json.dumps(feats, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        soup = make_soup(read_html(d / "index.html"))
+        # 章节切分与特征提取必须同源：--render 时两者都用渲染后 DOM
+        soup = make_soup(html_used)
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
         secs = extract_sections(soup)

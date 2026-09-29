@@ -15,8 +15,18 @@ python pipeline/aggregate.py --features-dir <features目录> --scores <llm_score
   （llm_overall 由评分 prompt 输出，锚点见 pipeline/llm_prompt.md）
 - learnability_subs / flow_subs 仅作诊断展示与改进建议定位，不参与维度加权
 - 自洽校验：维度 std > 1.0 → unstable；修复 = 剔除离中位数最远的一次后取均值
+- 维度置信度只反映评分一致性：std <= 0.3 → high / <= 0.8 → medium / 否则 low；
+  单次评分无自洽证据 → low（与分数高低无关，mean 不参与判断）
 - 置信度封顶：suspected_render_fault = true → total 封顶 85，
-  coverage / visualization 置信度强制 low（JS 渲染页静态提取不完整）
+  coverage / visualization 置信度强制 low（JS 渲染页静态提取不完整；
+  强制改写保留原值于 confidence_original，并标 confidence_overridden）
+- 证据置信度剔除（v2.4.2）：输入 dim_confidence（评分 LLM 自报，3 pass 多数票）中
+  为 low 的维度不参与加权，权重归一化到其余维度；分数仍展示并标 weighted=false。
+  无 dim_confidence 字段时行为与 v2.4.1 完全一致（向后兼容）
+- 决策性剔除（v2.4.3）：--exclude-dims a11y 将维度整体移出加权（评审决策：
+  纯无障碍项不计分），权重归一化到其余维度；同时把 impact_dim=a11y 的改进建议
+  按性质重分类——公式/文字替代→readability、图表文字替代→learnability、
+  错误兜底/防卡死→interaction、纯键盘/屏幕阅读器→not_tracked（不追踪）
 - 等级分档：A+ >=95 | A >=90 | A- >=85 | B+ >=80 | B >=75 | B- >=70
             | C+ >=65 | C >=60 | D <60
 - 权重表（tool/nav/docs 行）不完全归一，代码按 active 维度实际权重归一化
@@ -32,7 +42,7 @@ import json
 import sys
 from pathlib import Path
 
-CODE_VERSION = "v2.4.1"
+CODE_VERSION = "v2.4.3"  # v2.4.3: --exclude-dims 决策性剔除（a11y 移出加权）+ a11y 改进建议重分类
 
 DIMS = ["accuracy", "coverage", "structure", "readability", "a11y",
         "pedagogy", "visualization", "interaction", "learnability", "flow"]
@@ -72,7 +82,11 @@ def grade_of(total: float) -> str:
 
 
 def dim_stats(passes, idx: int) -> dict:
-    """3 次评分的均值 + 自洽校验。std > 1.0 → unstable：剔除离中位数最远的一次。"""
+    """3 次评分的均值 + 自洽校验。std > 1.0 → unstable：剔除离中位数最远的一次。
+
+    confidence 只反映评分一致性（不确定性），与分数高低无关：
+    单次评分无自洽证据 → low；std <= 0.3 → high；std <= 0.8 → medium；否则 low。
+    """
     vals = [float(p[idx]) for p in passes]
     mean = sum(vals) / len(vals)
     std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
@@ -86,14 +100,25 @@ def dim_stats(passes, idx: int) -> dict:
         used.remove(far)
         mean = sum(used) / len(used)
         fixed = True
-    if mean <= 0.3:
-        conf = "high"
+    if len(vals) < 2:
+        conf = "low"      # 单次评分：无自洽证据，不能因 std=0 而给 high
+    elif std <= 0.3:
+        conf = "high"     # 修复：原 mean <= 0.3 在 1~5 分制下不可达，且错把分数高低当置信度
     elif std <= 0.8:
         conf = "medium"
     else:
         conf = "low"
     return {"score": round(mean, 2), "confidence": conf, "std": round(std, 2),
             "unstable": bool(unstable), "unstable_fixed": bool(fixed)}
+
+
+def _override_confidence(dim: dict, new_conf: str, note: str) -> None:
+    """强制改写维度置信度时保留原值并打标，避免覆盖后无法追溯。"""
+    if not dim.get("confidence_overridden"):
+        dim["confidence_original"] = dim.get("confidence")
+        dim["confidence_overridden"] = True
+    dim["confidence"] = new_conf
+    dim["confidence_note"] = note
 
 
 def apply_hard_rules(scores: dict, feats: dict | None) -> dict:
@@ -113,9 +138,14 @@ def apply_hard_rules(scores: dict, feats: dict | None) -> dict:
     return {"notes": notes, "scores": scores}
 
 
-def weighted_total(scores: dict, page_type: str) -> float:
+def weighted_total(scores: dict, page_type: str,
+                   exclude: frozenset = frozenset()) -> float:
+    """加权总分。exclude 中的维度（如证据置信度 low）不参与加权，权重归一化到其余维度。"""
     weights = WEIGHTS.get(page_type, WEIGHTS["teaching"])
-    active = {k: w for k, w in weights.items() if scores.get(k) is not None}
+    active = {k: w for k, w in weights.items()
+              if scores.get(k) is not None and k not in exclude}
+    if not active and exclude:  # 兜底：全被剔除时退回不剔除，避免空分
+        active = {k: w for k, w in weights.items() if scores.get(k) is not None}
     total_w = sum(active.values())
     if total_w == 0:
         return 0.0
@@ -128,6 +158,70 @@ def ux_alert(stuck: float, thr: float):
     if stuck >= max(thr * 0.6, 0.1):
         return "medium"
     return None
+
+
+def remap_a11y_improvements(improvements: list) -> list:
+    """v2.4.3：a11y 移出加权后，将其名下改进建议按性质重分类。
+
+    - 公式文字替代（含 MathML）→ readability（普通学生也读不懂公式碎片）
+    - 错误兜底 / 替代路径 / 防卡死 → interaction（error_feedback / stuck）
+    - 图表文字替代描述 → learnability（看不懂图的学生也需要）
+    - 纯键盘 / 屏幕阅读器 / ARIA 标签 → not_tracked（决策不计分不追踪）
+    """
+    out = []
+    for imp in improvements:
+        imp = dict(imp)
+        if imp.get("impact_dim") == "a11y":
+            text = imp.get("action", "")
+            universal = any(k in text for k in
+                            ("公式", "MathML", "文字替代", "替代描述",
+                             "卡死", "重试", "替代路径", "错误说明"))
+            if not universal:
+                imp["impact_dim"] = "not_tracked"
+                imp["remap_note"] = "纯无障碍项（键盘/屏幕阅读器），v2.4.3 决策不计分不追踪"
+            elif "公式" in text or "MathML" in text:
+                imp["impact_dim"] = "readability"
+                imp["remap_note"] = "公式可读性问题，自 a11y 重分类（v2.4.3）"
+            elif any(k in text for k in ("卡死", "重试", "替代路径", "错误说明")):
+                imp["impact_dim"] = "interaction"
+                imp["remap_note"] = "错误兜底/防卡死问题，自 a11y 重分类（v2.4.3）"
+            else:
+                imp["impact_dim"] = "learnability"
+                imp["remap_note"] = "可视化文字替代问题，自 a11y 重分类（v2.4.3）"
+        out.append(imp)
+    return out
+
+
+def remap_a11y_improvements(improvements: list) -> list:
+    """v2.4.3：a11y 移出加权后，将其名下改进建议按性质重分类。
+
+    - 公式文字替代（含 MathML）→ readability（普通学生也读不懂公式碎片）
+    - 错误兜底 / 替代路径 / 防卡死 → interaction（error_feedback / stuck）
+    - 图表文字替代描述 → learnability（看不懂图的学生也需要）
+    - 纯键盘 / 屏幕阅读器 / ARIA 标签 → not_tracked（决策不计分不追踪）
+    """
+    out = []
+    for imp in improvements:
+        imp = dict(imp)
+        if imp.get("impact_dim") == "a11y":
+            text = imp.get("action", "")
+            universal = any(k in text for k in
+                            ("公式", "MathML", "文字替代", "替代描述",
+                             "卡死", "重试", "替代路径", "错误说明"))
+            if not universal:
+                imp["impact_dim"] = "not_tracked"
+                imp["remap_note"] = "纯无障碍项（键盘/屏幕阅读器），v2.4.3 决策不计分不追踪"
+            elif "公式" in text or "MathML" in text:
+                imp["impact_dim"] = "readability"
+                imp["remap_note"] = "公式可读性问题，自 a11y 重分类（v2.4.3）"
+            elif any(k in text for k in ("卡死", "重试", "替代路径", "错误说明")):
+                imp["impact_dim"] = "interaction"
+                imp["remap_note"] = "错误兜底/防卡死问题，自 a11y 重分类（v2.4.3）"
+            else:
+                imp["impact_dim"] = "learnability"
+                imp["remap_note"] = "可视化文字替代问题，自 a11y 重分类（v2.4.3）"
+        out.append(imp)
+    return out
 
 
 def _avg_ranks(vals):
@@ -157,7 +251,8 @@ def spearman(x, y) -> float:
     return num / den if den else float("nan")
 
 
-def aggregate_one(name: str, mod: dict, feats: dict | None, stuck_thr: float) -> dict:
+def aggregate_one(name: str, mod: dict, feats: dict | None, stuck_thr: float,
+                  decision_excluded: frozenset = frozenset()) -> dict:
     passes = mod["passes"]
     dims = {}
     for i, d in enumerate(DIMS):
@@ -190,7 +285,22 @@ def aggregate_one(name: str, mod: dict, feats: dict | None, stuck_thr: float) ->
         dims[d]["subs"] = subs_diag[f"{d}_subs"]
         dims[d]["note"] = "subs 仅诊断展示，不参与加权"
 
-    total = weighted_total({d: dims[d]["score"] for d in DIMS}, page_type)
+    dim_conf = mod.get("dim_confidence") or {}
+    evidence_excluded = {d for d in DIMS if dim_conf.get(d) == "low"}
+    excluded = evidence_excluded | (set(decision_excluded) & set(DIMS))
+    for d in DIMS:
+        if d in dim_conf:
+            dims[d]["evidence_confidence"] = dim_conf[d]
+    for d in evidence_excluded:
+        dims[d]["weighted"] = False
+        dims[d]["weight_note"] = "evidence_confidence=low → 剔除出加权，权重归一化到其余维度"
+    # v2.4.3 决策性剔除（如 a11y）：与证据置信度剔除合并，权重归一化到其余维度
+    for d in set(decision_excluded) & set(DIMS):
+        dims[d]["weighted"] = False
+        dims[d]["weight_note"] = "decision: 评审决策剔除出加权（v2.4.3），权重归一化到其余维度"
+
+    total = weighted_total({d: dims[d]["score"] for d in DIMS}, page_type,
+                           frozenset(excluded))
 
     cap = False
     fault = bool(feats and feats.get("suspected_render_fault"))
@@ -199,16 +309,20 @@ def aggregate_one(name: str, mod: dict, feats: dict | None, stuck_thr: float) ->
         total = min(total, CONFIDENCE_CAP)
         cap = True
         for d in ("coverage", "visualization"):
-            dims[d]["confidence"] = "low"
-            dims[d]["confidence_note"] = "suspected_render_fault: 静态提取不完整"
+            _override_confidence(
+                dims[d], "low", "suspected_render_fault: 静态提取不完整")
     elif density < DENSITY_FLOOR:
         for d in ("coverage", "visualization"):
             if dims[d]["confidence"] == "high":
-                dims[d]["confidence"] = "medium"
-                dims[d]["confidence_note"] = f"text_density<{DENSITY_FLOOR:.0f} 字符/KB"
+                _override_confidence(
+                    dims[d], "medium", f"text_density<{DENSITY_FLOOR:.0f} 字符/KB")
 
     stuck = float(feats.get("stuck", {}).get("likelihood", 0.0)) if feats else 0.0
     alert = ux_alert(stuck, stuck_thr)
+
+    imps = mod.get("improvements", [])
+    if "a11y" in decision_excluded:
+        imps = remap_a11y_improvements(imps)
 
     return {
         "module": name,
@@ -217,6 +331,8 @@ def aggregate_one(name: str, mod: dict, feats: dict | None, stuck_thr: float) ->
         "page_type": page_type,
         "page_type_source": pt_source,
         "confidence_cap_applied": cap,
+        "evidence_excluded_dims": sorted(evidence_excluded),
+        "decision_excluded_dims": sorted(set(decision_excluded) & set(DIMS)),
         "dimensions": dims,
         "hard_rules": {
             "alt_coverage": feats.get("alt_coverage") if feats else None,
@@ -233,7 +349,7 @@ def aggregate_one(name: str, mod: dict, feats: dict | None, stuck_thr: float) ->
             "suspected_render_fault": fault,
         },
         "evidence": mod.get("evidence", ""),
-        "improvements": mod.get("improvements", []),
+        "improvements": imps,
     }
 
 
@@ -283,6 +399,14 @@ def write_summary(out: Path, results: list, calib: dict, fingerprint: dict) -> N
     lines += ["## 置信度提示", ""]
     faulted = [r["module"] for r in results if r["static_confidence"]["suspected_render_fault"]]
     lines.append(f"- 疑似 JS 渲染故障（总分封顶 85）: {', '.join(faulted) or '无'}")
+    ev_excl = {r["module"]: r["evidence_excluded_dims"] for r in results
+               if r.get("evidence_excluded_dims")}
+    lines.append("- 证据置信度 low 剔除出加权: "
+                 + ("; ".join(f"{m}: {','.join(ds)}" for m, ds in ev_excl.items()) or "无"))
+    dec_excl = {r["module"]: r["decision_excluded_dims"] for r in results
+                if r.get("decision_excluded_dims")}
+    lines.append("- 评审决策剔除出加权（v2.4.3）: "
+                 + ("; ".join(f"{m}: {','.join(ds)}" for m, ds in dec_excl.items()) or "无"))
     (out / "report_summary.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -298,6 +422,9 @@ def main() -> None:
     ap.add_argument("--scores", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--stuck-threshold", type=float, default=0.25)
+    ap.add_argument("--exclude-dims", default="",
+                    help="逗号分隔的决策性剔除维度（如 a11y）：不参与加权，权重归一化到其余维度；"
+                         "a11y 剔除时同步重分类其名下改进建议")
     ap.add_argument("--batch", action="store_true", help="额外产出 report_summary.md")
     args = ap.parse_args()
 
@@ -305,6 +432,8 @@ def main() -> None:
     scores = json.loads(Path(args.scores).read_text(encoding="utf-8"))
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    decision_excluded = frozenset(
+        d.strip() for d in args.exclude_dims.split(",") if d.strip())
 
     today = datetime.date.today().isoformat()
     fingerprint = {
@@ -314,6 +443,7 @@ def main() -> None:
         "extractor": CODE_VERSION,
         "rubric": scores.get("meta", {}).get("rubric"),
         "scoring_mode": scores.get("meta", {}).get("scoring_mode"),
+        "excluded_dims": sorted(decision_excluded),
         "date": today,
     }
     fingerprint["fingerprint_id"] = f"{CODE_VERSION}|{fingerprint['rubric']}|{today}"
@@ -322,7 +452,8 @@ def main() -> None:
     for name, mod in scores.get("modules", {}).items():
         fpath = fdir / f"{name}.json"
         feats = json.loads(fpath.read_text(encoding="utf-8")) if fpath.exists() else None
-        results.append(aggregate_one(name, mod, feats, args.stuck_threshold))
+        results.append(aggregate_one(name, mod, feats, args.stuck_threshold,
+                                     decision_excluded))
 
     gold = scores.get("gold_standard_0_10") or {}
     excluded = set(scores.get("calibration_excluded") or [])
@@ -343,6 +474,18 @@ def main() -> None:
         "stuck_threshold": args.stuck_threshold,
         "modules": {r["module"]: r for r in results},
     }
+    if decision_excluded:
+        report["rubric_decisions"] = {
+            "excluded_dims": sorted(decision_excluded),
+            "reason": "评审决策：纯无障碍项不计分（v2.4.3）；"
+                      "a11y 名下普适性问题重分类至 readability/learnability/interaction",
+        }
+    if decision_excluded:
+        report["rubric_decisions"] = {
+            "excluded_dims": sorted(decision_excluded),
+            "reason": "评审决策：纯无障碍项不计分（v2.4.3）；"
+                      "a11y 名下普适性问题重分类至 readability/learnability/interaction",
+        }
     if calib:
         report["calibration"] = calib
     (out / "report.json").write_text(

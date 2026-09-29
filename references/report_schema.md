@@ -75,6 +75,12 @@
       "score": 4.2,             // 3 次均值（unstable 修复后 / 硬规则叠加后）
       "weight": 0.10,           // 该 page_type 的权重
       "confidence": "high|medium|low",
+                                // 仅反映 3 次评分一致性（不确定性）：std<=0.3 high /
+                                // <=0.8 medium / 否则 low；单次评分无自洽证据 → low；
+                                // 与分数高低无关
+      "confidence_original": "high",   // 仅被强制改写时出现：改写前的置信度
+      "confidence_overridden": true,   // 仅被强制改写时出现
+      "confidence_note": "...",        // 仅被强制改写时出现：改写原因
       "std": 0.24,              // 3 次评分总体标准差
       "unstable": false, "unstable_fixed": false,
       "hard_rule_adjusted": false,
