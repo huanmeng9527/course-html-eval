@@ -1,8 +1,8 @@
 # course-html-eval
 
-> 课程网页 HTML 质量评估 · 10 维 LLM 评分 + 防卡顿告警 · v2.4.3
+> 课程网页 HTML 质量评估 · 9 维加权 LLM 评分 + 防卡顿告警 · v2.4.3
 
-对教育类课程网页 HTML 做多维度质量评分。基于 **10 维 Rubric**（准确性 / 覆盖度 / 结构 / 可读性 / 教学 / 可视化 / 互动 / a11y / **可学性** / **学习流**）+ 硬规则指标 + 页面类型自动检测 + interaction 维度拆 4 子项防卡顿。
+对教育类课程网页 HTML 做多维度质量评分。基于 **9 维加权 Rubric**（准确性 / 覆盖度 / 结构 / 可读性 / 教学 / 可视化 / 互动 / **可学性** / **学习流**）+ 硬规则指标 + 页面类型自动检测 + interaction 维度拆 4 子项防卡顿。a11y（可访问性）已按评审决策移出加权，仅诊断展示。
 
 适用场景：shuku 用户上传课程内容评估、教学页面质量审核、课程页面自动评分。
 
@@ -15,7 +15,7 @@
   - `flow`（学习流，权重 0.10）— 章节顺序、操作链流畅性
 - **降 pedagogy 权重**：0.22 → **0.15**（用户校准显示 v2.3 严重偏高）
 - **LLM prompt 严格化**：加"5 分只给真正出色"等反偏差指令
-- **校准金标准**：学弟 11 模块主观评分（CourseMap 剔除），Spearman ρ 目标 ≥ 0.7
+- **校准机制**：支持用主观评分作 Spearman 校准金标准（ρ 目标 ≥ 0.7）
 
 ---
 
@@ -29,24 +29,8 @@
 - **stuck v2 信号法**：v1 文案启发式实测对 92% 页面误报 P0；v2 改为"风险信号 − 缓解机制"信号法，阈值 0.25（可调）
 - **JS 渲染盲区兜底**：`js_render_ratio` / `text_density` / `suspected_render_fault` → 置信度封顶，可选 playwright headless 重提取
 - **等级分档文档化**：A+ ≥95 · A ≥90 · A- ≥85 · B+ ≥80 · B ≥75 · B- ≥70 · C+ ≥65 · C ≥60 · D <60；报告 schema 见 `references/report_schema.md`
-- **批量汇总报告**：`aggregate.py --batch` 产出 `report_summary.md`（排名/10 维分布/违规统计/建议聚类/校准块）
-- **校准方法学修订**：金标准须在同一份静态提取文本上采集；n=11 重秩多时 ρ 需同时报告重秩比例
-
----
-
-## ✨ v2.4.2 新特性（证据置信度剔除）
-
-- **置信度逻辑修正**：`dim_stats()` 由 mean 阈值（1~5 尺度上不可达）改为**标准差法**——单 pass → low；std ≤ 0.3 → high；≤ 0.8 → medium；否则 low。置信度覆写保留原值（`confidence_original` + `confidence_overridden` 标记）
-- **证据置信度剔除**：评分 LLM 自报每维证据置信度（high|medium|low），3 pass 多数票聚合为 `dim_confidence`；**low 的维度不参与加权**（权重归一化到其余维度），分数仍展示并标 `weighted=false`——防止"没看全"的维度按臆测分拉低总分
-- **渲染提取一致性修复**：`--render` 同时作用于特征提取与章节切分（此前章节仍读静态 HTML）
-- **DeepSeek runner**：`pipeline/llm_runner_deepseek.py`——standard 档 3 pass 扰动评分、指数退避重试、JSON 降级解析、模块粒度断点续跑、`dim_confidence` 生产端
-
----
-
-## ✨ v2.4.3 新特性（评审决策剔除）
-
-- **决策剔除**：`aggregate.py --exclude-dims a11y` 将指定维度移出加权（如用户决策"本评估场景不考虑无障碍"），权重归一化到其余维度；报告新增 `decision_excluded_dims` 字段与 `rubric_decisions` 决策块
-- **建议重分类**：`remap_a11y_improvements()` 将剔除维度下的改进建议按关键词重分类到 readability / learnability / interaction（纯键盘/读屏项标记 `not_tracked`），避免"建议跟着维度一起丢"
+- **批量汇总报告**：`aggregate.py --batch` 产出 `report_summary.md`（排名/维度分布/违规统计/建议聚类/校准块）
+- **校准方法学修订**：金标准须在同一份静态提取文本上采集；样本重秩多时 ρ 需同时报告重秩比例
 
 ---
 
@@ -90,13 +74,13 @@ python pipeline/extract_features.py --modules-dir <模块目录> --out-dir <输�
 $env:DEEPSEEK_API_KEY = "sk-..."
 python pipeline/llm_runner_deepseek.py --sections-dir <输出目录>/sections --features-dir <输出目录>/features --out <输出目录>/llm_scores.json
 
-# 3) 聚合出报告（--exclude-dims 可选决策剔除，如 a11y）
-python pipeline/aggregate.py --features-dir <输出目录>/features --scores <输出目录>/llm_scores.json --out-dir <输出目录> --batch
+# 3) 聚合出报告（a11y 已按评审决策移出加权）
+python pipeline/aggregate.py --features-dir <输出目录>/features --scores <输出目录>/llm_scores.json --out-dir <输出目录> --batch --exclude-dims a11y
 ```
 
 ---
 
-## 10 维评分 Rubric
+## 评分 Rubric（加权 9 维）
 
 | 维度 | 含义 | teaching 权重 |
 |---|---|---|
@@ -104,15 +88,15 @@ python pipeline/aggregate.py --features-dir <输出目录>/features --scores <�
 | coverage | 知识覆盖度 | 0.10 |
 | structure | 结构清晰度 | 0.10 |
 | readability | 可读性 | 0.10 |
-| a11y | 可访问性 | 0.08 |
+| ~~a11y~~ | 可访问性（v2.4.3 评审决策移出加权，仅诊断展示） | — |
 | pedagogy | 教学设计 | **0.15** ↓ |
 | visualization | 可视化 | 0.06 |
 | interaction | 互动性 | 0.06 |
 | **learnability** ⭐ | **可学性（学生能否独立看懂/做对）** | **0.15** |
 | **flow** ⭐ | **学习流（章节顺序、操作链流畅性）** | **0.10** |
-| **合计** | | **1.00** |
+| **合计** | | **0.92**（按参与加权维度归一化） |
 
-页面类型自动检测（teaching/tool/nav/docs）后切换权重表。`code` 维度在 v2.3 已删除。
+页面类型自动检测（teaching/tool/nav/docs）后切换权重表。`code` 维度在 v2.3 已删除；a11y 维度在 v2.4.3 评审决策移出加权（运行时传 `--exclude-dims a11y`）。
 
 ---
 
@@ -149,27 +133,17 @@ else:                          ux_risk_alert = None
 
 ---
 
-## 🎓 校准金标准（v2.4 新增）
+## 🎓 校准（可选）
 
-学弟主观评分（满分 10）作为 Spearman 校准金标准：
+可用自己的主观评分作 Spearman 校准金标准（数据集 schema 见 `references/calibration_schema.md`）：
 
-| 模块 | 学弟分 | 模块 | 学弟分 |
-|---|---|---|---|
-| Activation-Func-Module | 9 | Loss-Guide-2 | 9 |
-| Convolution-Kernel-Intro | 8 | LeNet5-CNN-Lab | 7 |
-| Digital-Image-Module | 9 | Manual-Feature-Classification | 7 |
-| Face-Recog-Lab | 10 | MLP_playground | 7 |
-| Gradient-Descent-Module | 7 | Neuron-Guide | 7 |
-| Loss-Guide | 8 | ~~CourseMap~~ | ~~2（技术故障，剔除）~~ |
+1. 对同一批页面采集人工主观评分（0~10），写入评分 JSON 的 `gold_standard_0_10` 字段
+2. 跑 LLM 评分后，`aggregate.py` 自动计算 Spearman ρ（并列值取平均秩）
+3. ρ ≥ 0.7 → 通过；< 0.7 → 调权重或 prompt
 
-**校准流程**：
-1. 跑 v2.4 LLM 评分（11 模块）
-2. Spearman ρ ≥ 0.7 → 通过；< 0.7 → 调权重或 prompt
-
-**方法学注意（v2.4.1）**：
+**方法学注意**：
 - 金标准必须在**同一份静态提取文本**上采集——若金标准者看完整交互版、LLM 只看静态提取版，比较对象不一致，会混淆"rubric 偏差"与"评审对象差异"
-- n=11 且重秩多（实测四个 7、三个 9）时 Spearman ρ 本身不稳定，需同时报告重秩比例
-- ρ 计算：`pipeline/aggregate.py::spearman`（并列值取平均秩）
+- 样本量小且重秩多时 Spearman ρ 本身不稳定，需同时报告重秩比例
 
 ---
 
@@ -186,8 +160,8 @@ course-html-eval/
 │   ├── aggregate.py                     # 步骤 7~11：自洽/硬规则/加权/分档/封顶/校准 ρ（--batch / --exclude-dims）
 │   └── llm_prompt.md                    # 步骤 6：完整 prompt 模板（锚点 + 子项定义 + 扰动协议）
 └── references/
-    ├── rubric_full.md                   # 10 维评分 1~5 锚点
-    ├── calibration_schema.md            # 校准数据集 schema + v1 校准集
+    ├── rubric_full.md                   # 评分 1~5 锚点
+    ├── calibration_schema.md            # 校准数据集 schema
     ├── hard_rules.md                    # 硬规则映射表
     ├── interaction_robustness.md        # interaction 4 子项细则
     ├── learnability_flow.md             # learnability 3 子项 + flow 2 子项细则
@@ -245,12 +219,12 @@ course-html-eval/
 3. 页面类型自动检测（静态规则 + 名称兜底，输出 `page_type_source`）
 4. 硬规则提取（4 个：alt/heading/aria/stuck_likelihood **v2 信号法**）
 5. 章节切分（≤ 800 tokens，作为证据注入 prompt）
-6. LLM 10 维评分（**严格化 prompt** / 整页 3 次 + 扰动协议 / interaction 拆 4 子项 / learnability 拆 3 子项 / flow 拆 2 子项）→ `pipeline/llm_prompt.md`
+6. LLM 多维评分（**严格化 prompt** / 整页 3 次 + 扰动协议 / interaction 拆 4 子项 / learnability 拆 3 子项 / flow 拆 2 子项）→ `pipeline/llm_prompt.md`
 7. Self-Consistency 校验（standard+，unstable → 剔离群取均值）→ `pipeline/aggregate.py::dim_stats`
 8. 硬规则叠加
 9. 维度加权与总分（归一化 0~100 / 等级分档 / 渲染故障置信度封顶）
 10. 改进建议生成（**ux_risk_alert=P0 强制置顶**）
-11. 输出报告（schema 1.1，含 fingerprint / 10 维 + 子项）；多页时 `aggregate.py --batch` 产出 `report_summary.md`
+11. 输出报告（schema 1.1，含 fingerprint / 全维度 + 子项）；多页时 `aggregate.py --batch` 产出 `report_summary.md`
 
 ---
 
@@ -267,7 +241,7 @@ course-html-eval/
 | **v2.4.3** | 评审决策剔除 `--exclude-dims` / 剔除维度改进建议重分类（remap_a11y_improvements）/ 报告 `decision_excluded_dims` + `rubric_decisions` |
 | **v2.4.2** | 证据置信度剔除（dim_confidence 3 pass 多数票，low 维度不参与加权）/ dim_stats 置信度标准差法修正 / 覆写保留原值 / --render 章节一致性修复 / DeepSeek runner 入库 |
 | **v2.4.1** | pipeline/ 参考实现 / llm_overall + transition_quality schema 修正 / standard=每页 3 次+扰动协议 / stuck v2 信号法 / JS 渲染置信度封顶 / 等级分档 + 报告 schema / 批量汇总 / 校准方法学 |
-| **v2.4** | 加 learnability + flow 2 维（10 维）/ pedagogy 0.22→0.15 / 严格化 prompt / 学弟 11 模块评分作校准金标准 |
+| **v2.4** | 加 learnability + flow 2 维 / pedagogy 0.22→0.15 / 严格化 prompt / 主观评分校准机制 |
 | v2.3 | 删除 code 维度（8 维）/ interaction 0.05→0.08 |
 | v2.2 | interaction 拆 4 子项 / ux_risk_alert / stuck_likelihood 硬规则 |
 | v2.1 | 三档配置 lite/standard/strict / 硬规则 8→3 |
