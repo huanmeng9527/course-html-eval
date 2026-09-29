@@ -192,38 +192,6 @@ def remap_a11y_improvements(improvements: list) -> list:
     return out
 
 
-def remap_a11y_improvements(improvements: list) -> list:
-    """v2.4.3：a11y 移出加权后，将其名下改进建议按性质重分类。
-
-    - 公式文字替代（含 MathML）→ readability（普通学生也读不懂公式碎片）
-    - 错误兜底 / 替代路径 / 防卡死 → interaction（error_feedback / stuck）
-    - 图表文字替代描述 → learnability（看不懂图的学生也需要）
-    - 纯键盘 / 屏幕阅读器 / ARIA 标签 → not_tracked（决策不计分不追踪）
-    """
-    out = []
-    for imp in improvements:
-        imp = dict(imp)
-        if imp.get("impact_dim") == "a11y":
-            text = imp.get("action", "")
-            universal = any(k in text for k in
-                            ("公式", "MathML", "文字替代", "替代描述",
-                             "卡死", "重试", "替代路径", "错误说明"))
-            if not universal:
-                imp["impact_dim"] = "not_tracked"
-                imp["remap_note"] = "纯无障碍项（键盘/屏幕阅读器），v2.4.3 决策不计分不追踪"
-            elif "公式" in text or "MathML" in text:
-                imp["impact_dim"] = "readability"
-                imp["remap_note"] = "公式可读性问题，自 a11y 重分类（v2.4.3）"
-            elif any(k in text for k in ("卡死", "重试", "替代路径", "错误说明")):
-                imp["impact_dim"] = "interaction"
-                imp["remap_note"] = "错误兜底/防卡死问题，自 a11y 重分类（v2.4.3）"
-            else:
-                imp["impact_dim"] = "learnability"
-                imp["remap_note"] = "可视化文字替代问题，自 a11y 重分类（v2.4.3）"
-        out.append(imp)
-    return out
-
-
 def _avg_ranks(vals):
     order = sorted(range(len(vals)), key=lambda i: vals[i])
     ranks = [0.0] * len(vals)
@@ -474,12 +442,6 @@ def main() -> None:
         "stuck_threshold": args.stuck_threshold,
         "modules": {r["module"]: r for r in results},
     }
-    if decision_excluded:
-        report["rubric_decisions"] = {
-            "excluded_dims": sorted(decision_excluded),
-            "reason": "评审决策：纯无障碍项不计分（v2.4.3）；"
-                      "a11y 名下普适性问题重分类至 readability/learnability/interaction",
-        }
     if decision_excluded:
         report["rubric_decisions"] = {
             "excluded_dims": sorted(decision_excluded),
